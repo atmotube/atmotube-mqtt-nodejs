@@ -1,0 +1,176 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('nodejs:server');
+var http = require('http');
+var mqtt = require('mqtt');
+
+const MongoClient = require('mongodb').MongoClient;
+var db_url = "mongodb://localhost:27017";
+
+var client = mqtt.connect('mqtt://localhost', {
+    port: 1883,
+    host: 'localhost',
+    protocol: 'mqtt',
+    clientId: 'database',
+    username: 'username',
+    password: 'password'
+});
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+client.on('connect', function () {
+    client.subscribe('#', function (err) {
+    })
+});
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+MongoClient.connect(db_url, function(err, client) {
+    if (err) throw err;
+    app.locals.db = client.db('atmotube');
+    console.log("Connected successfully to mongo");
+    server.listen(port);
+    server.on('error', onError);
+    server.on('listening', onListening);
+});
+
+
+var io = require('socket.io')(server);
+io.on('connection', (socket) => {
+    console.log('a user connected');
+    if(cachedFiltered) {
+        socket.emit('atmotube_data', cachedFiltered);
+    }
+    socket.on('disconnect', () => {
+        console.log('user disconnected');
+    });
+});
+var cachedFiltered;
+
+client.on('message', function (topic, message) {
+    console.log(message.toString());
+    var json_message = JSON.parse(message.toString());
+    var filtered = {};
+    json_message.forEach(item => {
+        if (!(item.mac in filtered)) {
+            filtered[item.mac] = {rssi: item.rssi, timestamp: item.timestamp};
+        }
+        if (item.bleName === 'ATMOTUBE' && item.rawData && item.rawData.length === 58) {
+            filtered[item.mac].scan = item.rawData;
+        } else if (item.rawData && item.rawData.length === 62) {
+            filtered[item.mac].response = item.rawData;
+        }
+    });
+    // parse Atmotube data - see https://help.atmotube.com/technical/14-atmotube-ble-api/
+    for (var mac in filtered) {
+        var atmotube = filtered[mac];
+        atmotube.mac = mac;
+        console.log('mac ' + mac);
+        if (atmotube.scan && atmotube.response) {
+            atmotube.voc = parseInt('0x' + atmotube.scan.substring(14, 18)) / 1000;
+            atmotube.humidity = parseInt('0x' + atmotube.scan.substring(22, 24));
+            atmotube.temperature = parseInt('0x' + atmotube.scan.substring(24, 26));
+            atmotube.pressure = parseInt('0x' + atmotube.scan.substring(26, 34)) / 100;
+            var infoByte = parseInt('0x' + atmotube.scan.substring(34, 36));
+            atmotube.battery = parseInt('0x' + atmotube.scan.substring(36, 38));
+            atmotube.fw = atmotube.response.substring(56);
+            atmotube.charging = (infoByte & 16 === 16) === 1;
+            if (atmotube.fw.startsWith('74')) {
+                atmotube.pm_on = infoByte & 1 === 1;
+                if (atmotube.pm_on) {
+                    atmotube.pm1 = parseInt('0x' + atmotube.response.substring(44, 48));
+                    atmotube.pm25 = parseInt('0x' + atmotube.response.substring(48, 52));
+                    atmotube.pm10 = parseInt('0x' + atmotube.response.substring(52, 56));
+                } else if(cachedFiltered && atmotube.pm1) {
+                    atmotube.pm1 = cachedFiltered[mac].pm1;
+                    atmotube.pm25 = cachedFiltered[mac].pm25;
+                    atmotube.pm10 = cachedFiltered[mac].pm10;
+                }
+            }
+            delete atmotube.scan;
+            delete atmotube.response;
+        }
+    }
+    app.locals.db.collection('data').insertMany(Object.values(filtered));
+    console.log(filtered);
+    cachedFiltered = filtered;
+    io.emit('atmotube_data', filtered);
+});
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+    var port = parseInt(val, 10);
+
+    if (isNaN(port)) {
+        // named pipe
+        return val;
+    }
+
+    if (port >= 0) {
+        // port number
+        return port;
+    }
+
+    return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+    if (error.syscall !== 'listen') {
+        throw error;
+    }
+
+    var bind = typeof port === 'string'
+        ? 'Pipe ' + port
+        : 'Port ' + port;
+
+    // handle specific listen errors with friendly messages
+    switch (error.code) {
+        case 'EACCES':
+            console.error(bind + ' requires elevated privileges');
+            process.exit(1);
+            break;
+        case 'EADDRINUSE':
+            console.error(bind + ' is already in use');
+            process.exit(1);
+            break;
+        default:
+            throw error;
+    }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+    var addr = server.address();
+    var bind = typeof addr === 'string'
+        ? 'pipe ' + addr
+        : 'port ' + addr.port;
+    debug('Listening on ' + bind);
+}

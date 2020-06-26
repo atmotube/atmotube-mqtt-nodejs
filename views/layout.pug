@@ -1,0 +1,14 @@
+doctype html
+html
+  head
+    title= title
+    link(rel='stylesheet', href='/css/style.css')
+    script(src="/socket.io/socket.io.js")
+    script(src="//code.jquery.com/jquery-3.4.1.min.js")
+    script(src="//code.highcharts.com/highcharts.js")
+    script(src="//code.highcharts.com/highcharts-more.js")
+    script(src="//code.highcharts.com/modules/data.js")
+  body
+    script
+      include script.js
+    block content
